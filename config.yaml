@@ -25,8 +25,22 @@ model:
   pad_token_id: 0
   pre_layer_norm: false
 
-  # HuggingFace Pretrained Tokenizer
-  tokenizer_name: "bert-base-uncased"
-  tokenizer_padding: true
-  tokenizer_truncation: true
-  tokenizer_max_length: 512
+tokenizer:
+  name: "bert-base-uncased"
+  padding: "max_length"
+  truncation: true
+  max_length: 512
+
+training:
+  epochs: 3
+  batch_size: 8
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  seed: 42
+  eval_steps: 100
+  save_steps: 200
+  checkpoint_dir: "./checkpoints"
+  use_wandb: false
+  wandb_project: "LFB-Masked-Language-Modeling"
