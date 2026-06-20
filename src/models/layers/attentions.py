@@ -1,143 +1,101 @@
-from typing import Optional, Tuple
+import math
+
 import torch
-import torch.nn.functional as F
 from torch import nn
 
-
-class Attention(nn.Module):  # TODO Change to FlashAttention
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int = 8,
-        qkv_bias: bool = False,
-        qk_scale: Optional[float] = None,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
-    ):
-        super(Attention).__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim**-0.5
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
-        q, k, v = qkv[0], qkv[1], qkv[2]
-
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x, attn
+from src.models.configs import BertConfig
 
 
-class FlashAttention(nn.Module):
+class ScaledDotProductAttention(nn.Module):
     """
-    Attention using PyTorch's scaled_dot_product_attention which automatically
-    uses FlashAttention/MemoryEfficientAttention when available.
+    Scaled Dot-Product Attention mechanism.
+
+    Args:
+        config: BertConfig
+            Configuration for the BERT model.
     """
 
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int = 8,
-        qkv_bias: bool = False,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
-    ):
-        super(FlashAttention).__init__()
-        self.num_heads = num_heads
+    def __init__(self, config: BertConfig):
+        super().__init__()
+        assert config.hidden_size % config.num_attention_heads == 0
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop_prob = attn_drop
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
+        # heads are parallel streams, and outputs get concatenated.
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = nn.Linear(config.hidden_size, config.hidden_size * 3)
+        # output projection
+        self.c_proj = nn.Linear(config.hidden_size, config.hidden_size)
+        self.dropout_attn = nn.Dropout(config.attention_probs_dropout_prob)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, x: torch.Tensor, is_causal: bool = False) -> torch.Tensor:
-        B, N, C = x.shape
-        # qkv: (B, N, 3, H, C // H) -> (3, B, H, N, C // H)
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
-        q, k, v = qkv.unbind(0)
-
-        # PyTorch SDPA (Automatically uses FlashAttention if available)
-        x = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            dropout_p=self.attn_drop_prob if self.training else 0.0,
-            is_causal=is_causal,
-        )
-
-        x = x.transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-
-class CrossAttention(nn.Module):
-    """
-    Cross-attention mechanism where queries come from x, and keys/values come from a context.
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int = 8,
-        qkv_bias: bool = False,
-        qk_scale: Optional[float] = None,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
-    ):
-        super(CrossAttention).__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim**-0.5
-
-        self.q = nn.Linear(dim, dim, bias=qkv_bias)
-        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
+        self.hidden_size = config.hidden_size  # 768
+        self.n_head = config.num_attention_heads  # 12
+        self.head_size = config.hidden_size // config.num_attention_heads  # 64
 
     def forward(
-        self, x: torch.Tensor, context: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        B, N, C = x.shape
-        _, M, _ = context.shape
+        self, x: torch.Tensor, attention_mask: torch.LongTensor
+    ) -> torch.Tensor:
+        """
+        Forward pass for the attention mechanism.
 
-        q = (
-            self.q(x)
-            .reshape(B, N, self.num_heads, C // self.num_heads)
-            .permute(0, 2, 1, 3)
-        )
-        kv = (
-            self.kv(context)
-            .reshape(B, M, 2, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
-        k, v = kv[0], kv[1]
+        Args:
+            x: torch.Tensor
+                Input tensor.
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
+        Returns:
+            torch.Tensor: Output tensor after applying attention.
+        """
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x, attn
+        # calculate query, key, value for all heads in batch
+        # C is hidden_size, which is 768 in BERT
+        # nh is "number of heads", which is 12 in BERT
+        # hs is "head size", which is C // nh = 768 // 12 = 64 in BERT
+
+        qkv = self.c_attn(x)  # (B, T, 3*C)
+        q, k, v = qkv.split(self.hidden_size, dim=2)  # (B, T, C) x 3
+        # (B, T, C) -> (B, T, nh, C/nh) = (B, T, nh, 64) --transpose(1,2)--> (B, nh, T, 64)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(
+            1, 2
+        )  # (B, nh, T, 64)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(
+            1, 2
+        )  # (B, nh, T, 64)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(
+            1, 2
+        )  # (B, nh, T, 64)
+
+        # attention multiplies the head_size dimension (T,64) x (64,T) = (T,T)
+        # (B, nh, T, 64) x (B, nh, 64, T) -> (B, nh, T, T)
+        att = q @ k.transpose(2, 3)
+        att = att / math.sqrt(self.head_size)
+
+        # attention mask is a binary mask of shape (B,T) that is 1 for positions we want to attend to
+        attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T)
+        # Broadcast to (B, nh, T, T) by applying it to the key dimension
+        # Mask out padding by setting scores to -inf where attn_mask is 0
+        att = att.masked_fill(
+            attention_mask == 0, torch.finfo(att.dtype).min
+        )  # (B, nh, T, T)
+
+        # att describes the relation between the tokens in the sequence
+        # how much token 0 should be a mixture of tokens 0 through T
+        att = nn.functional.softmax(att, dim=-1)
+        # Randomly sets some attention weights to zero during training,
+        # meaning certain key-value pairs are ignored for that forward pass.
+        # This prevents the model from over-relying on specific attention patterns.
+        att = self.dropout_attn(att)
+
+        # re-mix the value tokens, by multiplying each token by the corresponding
+        # weights in the attention matrix. Do this across all 64 dimensions
+        y = att @ v  # (B, nh, T, T) x (B, nh, T, 64) -> (B, nh, T, 64)
+        # The masked values (0 values in the attention mask), e.g. the values
+        # from t:T in the sequence of length T, will have random noisy values
+        # in the (:,:,t:T,:) region of the tensor.
+        # Obvously these values should be ignored in the final output.
+
+        # (B, nh, T, 64) -> (B, T, nh, 64) -> (B, T, nh*64 = 12*64 = 768)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        # output projection
+        y = self.c_proj(y)
+        y = self.dropout(y)
+        return y
