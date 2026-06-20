@@ -30,6 +30,9 @@ class ScaledDotProductAttention(nn.Module):
         self.hidden_size = config.hidden_size  # 768
         self.n_head = config.num_attention_heads  # 12
         self.head_size = config.hidden_size // config.num_attention_heads  # 64
+        self.position_embedding_type = getattr(
+            config, "position_embedding_type", "absolute"
+        )
 
     def forward(
         self, x: torch.Tensor, attention_mask: torch.LongTensor
@@ -68,6 +71,12 @@ class ScaledDotProductAttention(nn.Module):
         # (B, nh, T, 64) x (B, nh, 64, T) -> (B, nh, T, T)
         att = q @ k.transpose(2, 3)
         att = att / math.sqrt(self.head_size)
+
+        if self.position_embedding_type.lower() == "alibi":
+            from .positional_encoding import build_alibi_tensor
+
+            alibi_bias = build_alibi_tensor(T, self.n_head, device=att.device)
+            att = att + alibi_bias
 
         # attention mask is a binary mask of shape (B,T) that is 1 for positions we want to attend to
         attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T)

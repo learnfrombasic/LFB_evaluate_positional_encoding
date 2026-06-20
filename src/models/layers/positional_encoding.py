@@ -18,11 +18,6 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-# ---------------------------------------------------------------------------
-# Sinusoidal PE (consolidates: FixedPositionalEncoding, AbsolutePositionalEncoding,
-#                               TemporalPositionalEncoding, tAPE)
-# ---------------------------------------------------------------------------
-
 
 class SinusoidalPositionalEncoding(nn.Module):
     """Fixed sinusoidal positional encoding (Vaswani et al., 2017).
@@ -86,11 +81,6 @@ class SinusoidalPositionalEncoding(nn.Module):
         return self.dropout(x + enc)
 
 
-# ---------------------------------------------------------------------------
-# Learnable PE (consolidates: LearnedPositionalEncoding, LearnablePositionalEncoding)
-# ---------------------------------------------------------------------------
-
-
 class LearnablePositionalEncoding(nn.Module):
     """Learned positional encoding (Gehring et al., 2017).
 
@@ -124,13 +114,6 @@ class LearnablePositionalEncoding(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Expects batch-first: (B, T, D)
         return self.dropout(x + self.pe[: x.size(1)])
-
-
-# ---------------------------------------------------------------------------
-# Rotary Positional Encoding — RoPE (Su et al., 2021)
-# https://arxiv.org/abs/2104.09864
-# Used in: LLaMA, PaLM, GPT-NeoX
-# ---------------------------------------------------------------------------
 
 
 class RotaryPositionalEncoding(nn.Module):
@@ -173,12 +156,6 @@ class RotaryPositionalEncoding(nn.Module):
         return rotated
 
 
-# ---------------------------------------------------------------------------
-# Relative Positional Encoding (Shaw et al., 2018)
-# https://arxiv.org/abs/1803.02155
-# ---------------------------------------------------------------------------
-
-
 class RelativePositionalEncoding(nn.Module):
     """Relative positional encoding via learnable pairwise distance embeddings.
 
@@ -212,12 +189,6 @@ class RelativePositionalEncoding(nn.Module):
             .expand(batch_size, -1, -1)
         )
         return self.dropout(x + pos_encoding)
-
-
-# ---------------------------------------------------------------------------
-# T5-style relative position buckets (Raffel et al., 2019)
-# https://arxiv.org/abs/1910.10683
-# ---------------------------------------------------------------------------
 
 
 def _get_relative_position_bucket(
@@ -279,12 +250,6 @@ def get_relative_positions(
     )
 
 
-# ---------------------------------------------------------------------------
-# Stochastic Positional Encoding — SPE (Liutkus et al., 2021)
-# https://arxiv.org/abs/2108.12409
-# ---------------------------------------------------------------------------
-
-
 class SineSPE(nn.Module):
     """Sinusoidal Stochastic Positional Encoding (sine variant).
 
@@ -342,11 +307,6 @@ class ConvSPE(nn.Module):
         return self.conv(x.permute(0, 2, 1)).permute(0, 2, 1)
 
 
-# ---------------------------------------------------------------------------
-# Variable Positional Encoding — for multivariate / channel-wise data
-# ---------------------------------------------------------------------------
-
-
 class VariablePositionalEncoding(nn.Module):
     """Per-variable (channel) positional encoding for multivariate sequences.
 
@@ -363,9 +323,57 @@ class VariablePositionalEncoding(nn.Module):
         return x + self.variable_embedding(variable_idx).unsqueeze(0)
 
 
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
+class ALiBiPositionalEncoding(nn.Module):
+    """ALiBi (Attention with Linear Biases) placeholder.
+
+    ALiBi does not modify token embeddings. Instead, it adds a linear bias
+    directly to the attention scores. This class acts as an identity mapping
+    in the embeddings layer when ALiBi is selected. The actual bias is applied
+    in the attention layer.
+
+    Reference: Press et al. (2022) — https://arxiv.org/abs/2108.12409
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+def build_alibi_tensor(
+    seq_len: int, num_heads: int, device: torch.device
+) -> torch.Tensor:
+    """Generates the ALiBi bias tensor for a given sequence length and number of heads.
+    Returns tensor of shape (1, num_heads, seq_len, seq_len).
+    """
+    # Calculate ALiBi slopes m_h
+    closest_power_of_2 = 2 ** math.floor(math.log2(num_heads))
+    base = 2 ** (-(2 ** -(math.log2(closest_power_of_2) - 3)))
+    slopes = [math.pow(base, i) for i in range(1, closest_power_of_2 + 1)]
+
+    if closest_power_of_2 != num_heads:
+        extra_base = 2 ** (-(2 ** -(math.log2(2 * closest_power_of_2) - 3)))
+        slopes.extend(
+            [
+                math.pow(extra_base, i)
+                for i in range(1, 2 * (num_heads - closest_power_of_2) + 1, 2)
+            ]
+        )
+
+    slopes_tensor = torch.tensor(slopes, dtype=torch.float32, device=device)
+
+    # Calculate absolute relative distances |i - j|
+    context_position = torch.arange(seq_len, device=device)[:, None]
+    memory_position = torch.arange(seq_len, device=device)[None, :]
+    relative_position = torch.abs(context_position - memory_position)
+
+    # bias = -m * |i - j|
+    # shape: (num_heads, seq_len, seq_len)
+    bias = relative_position.unsqueeze(0) * slopes_tensor.unsqueeze(1).unsqueeze(1)
+
+    # shape: (1, num_heads, seq_len, seq_len)
+    return -bias.unsqueeze(0)
 
 
 def get_pos_encoder(pos_encoding: str):
@@ -380,6 +388,7 @@ def get_pos_encoder(pos_encoding: str):
         "rotary": RotaryPositionalEncoding,
         "rope": RotaryPositionalEncoding,
         "relative": RelativePositionalEncoding,
+        "alibi": ALiBiPositionalEncoding,
     }
     key = pos_encoding.lower()
     if key not in mapping:

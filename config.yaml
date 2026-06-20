@@ -19,7 +19,8 @@ model:
   # - "tape"
   # - "rotary" (or "rope")
   # - "relative"
-  position_embedding_type: "absolute"
+  # - "alibi"
+  position_embedding_type: "alibi"
 
   pad_token_id: 0
   pre_layer_norm: false

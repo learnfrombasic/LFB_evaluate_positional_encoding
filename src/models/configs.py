@@ -59,7 +59,9 @@ class BertConfig:
     type_vocab_size: int = 2
     initializer_range: float = 0.02
     layer_norm_eps: float = 1e-12
-    position_embedding_type: str = "absolute"
+    position_embedding_type: str = (
+        "absolute"  # "absolute", "relative", "rotary", "alibi", etc.
+    )
     pad_token_id: int = 0
     pre_layer_norm: bool = False
     tokenizer_name: str = "bert-base-uncased"
