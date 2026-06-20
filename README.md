@@ -2,8 +2,8 @@
 # LFB-Evaluate Positional Encoding
 
 > [!NOTE]
-> This project is currently under construction.
-> Please check back later for more updates.
+> This project is stopped due to lack of computational resources.
+> However, I will continue the project in the future with more computational resources.
 
 
 ## Overview

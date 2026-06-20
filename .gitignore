@@ -222,3 +222,4 @@ data/*
 vendors
 checkpoints/
 logs/
+wandb/

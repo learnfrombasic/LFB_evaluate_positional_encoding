@@ -17,6 +17,14 @@ class WandbCallback:
         )
         self.best_accuracy = 0.0
 
+    def on_train_begin(self, trainer) -> None:
+        """Called at the start of training.
+
+        Currently logs the start of the run in WandB. Can be extended for custom behavior.
+        """
+        # Log a simple tag indicating training has begun.
+        self.run.log({"train/begin": True})
+
     def log_metrics(self, metrics, step, prefix="eval"):
         """
         Logs a dictionary of metrics.
