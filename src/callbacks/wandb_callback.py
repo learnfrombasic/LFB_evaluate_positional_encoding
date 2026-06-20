@@ -48,3 +48,15 @@ class WandbCallback:
     def finish(self):
         """Closes the W&B run"""
         self.run.finish()
+
+    def on_step_end(self, trainer, step: int, loss: float, lr: float) -> None:
+        """Called at the end of every training step."""
+        self.log_metrics({"loss": loss, "lr": lr}, step=step, prefix="train")
+
+    def on_evaluate(self, trainer, step: int, metrics: dict) -> None:
+        """Called at the end of every evaluation run."""
+        self.log_metrics(metrics, step=step, prefix="eval")
+
+    def on_train_end(self, trainer) -> None:
+        """Called at the end of training."""
+        self.finish()

@@ -16,7 +16,7 @@ from src.utils import detect_device, read_yaml, setup_logger
 logger = setup_logger("main_entrypoint")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="LFB Positional Encoding Pre-training and Evaluation Pipeline"
     )
@@ -27,7 +27,7 @@ def main():
         "--mode",
         type=str,
         default="train",
-        choices=["train", "eval"],
+        choices=["train", "eval", "test"],
         help="Pipeline execution mode",
     )
     parser.add_argument(
@@ -40,7 +40,7 @@ def main():
         "--model_path",
         type=str,
         default=None,
-        help="Path to model weights .pt file (required for eval mode)",
+        help="Path to model weights .pt file (required for eval or test mode)",
     )
 
     args = parser.parse_args()
@@ -58,56 +58,48 @@ def main():
 
     if args.mode == "train":
         # Load dataset splits
-        try:
-            # Try to load standard train and validation splits
-            train_ds = load_dataset(dataset_name, split="train")
-            val_ds = load_dataset(dataset_name, split="validation")
-        except Exception:
-            # Fall back to load full and split manually if validation split is not direct
-            full_ds = load_dataset(dataset_name, split="train")
-            split_ds = full_ds.train_test_split(test_size=0.1, seed=42)
-            train_ds = split_ds["train"]
-            val_ds = split_ds["test"]
+        train_ds = load_dataset(dataset_name, split="train")
+        val_ds = load_dataset(dataset_name, split="validation")
+        test_ds = load_dataset(dataset_name, split="test")
 
         if args.subset is not None:
             train_ds = train_ds.select(range(min(len(train_ds), args.subset)))
             val_ds = val_ds.select(
                 range(min(len(val_ds), max(1, int(args.subset * 0.2))))
             )
+            test_ds = test_ds.select(
+                range(min(len(test_ds), max(1, int(args.subset * 0.2))))
+            )
             logger.info(
-                f"Sub-sampled dataset: train size = {len(train_ds)}, validation size = {len(val_ds)}"
+                f"Sub-sampled dataset: train size = {len(train_ds)}, validation size = {len(val_ds)}, test size = {len(test_ds)}"
             )
 
         trainer = Trainer(config_path=args.config)
-        trainer.setup_dataloaders(train_dataset=train_ds, val_dataset=val_ds)
+        trainer.setup_dataloaders(
+            train_dataset=train_ds, val_dataset=val_ds, test_dataset=test_ds
+        )
 
         logger.info("Starting training pipeline...")
         trainer.train()
         logger.info("Training pipeline completed successfully.")
 
-    elif args.mode == "eval":
+    elif args.mode in ["eval", "test"]:
         if args.model_path is None:
             raise ValueError(
-                "A valid --model_path pointing to a .pt file must be specified in eval mode."
+                f"A valid --model_path pointing to a .pt file must be specified in {args.mode} mode."
             )
         if not os.path.exists(args.model_path):
             raise FileNotFoundError(
                 f"Model weight checkpoint file not found: {args.model_path}"
             )
 
-        # Load evaluation split
-        try:
-            val_ds = load_dataset(dataset_name, split="validation")
-        except Exception:
-            try:
-                val_ds = load_dataset(dataset_name, split="test")
-            except Exception:
-                full_ds = load_dataset(dataset_name, split="train")
-                val_ds = full_ds.train_test_split(test_size=0.1, seed=42)["test"]
+        # Load evaluation or test split
+        target_split = "validation" if args.mode == "eval" else "test"
+        eval_ds = load_dataset(dataset_name, split=target_split)
 
         if args.subset is not None:
-            val_ds = val_ds.select(range(min(len(val_ds), args.subset)))
-            logger.info(f"Sub-sampled evaluation dataset: size = {len(val_ds)}")
+            eval_ds = eval_ds.select(range(min(len(eval_ds), args.subset)))
+            logger.info(f"Sub-sampled evaluation dataset: size = {len(eval_ds)}")
 
         device = detect_device()
         logger.info(f"Using device for evaluation: {device}")
@@ -157,25 +149,25 @@ def main():
 
         # Setup Dataloader
         tokenizer = BertTokenizer(model_id=tokenizer_name)
-        val_lfb_ds = LfbDataset(
-            dataset=val_ds,
+        eval_lfb_ds = LfbDataset(
+            dataset=eval_ds,
             tokenizer=tokenizer,
             max_length=tokenizer_config.get("max_length", 512),
             text_column="text",
             mlm=(task == "mlm"),
         )
-        val_loader = DataLoader(
-            val_lfb_ds,
+        eval_loader = DataLoader(
+            eval_lfb_ds,
             batch_size=config.get("training", {}).get("batch_size", 16),
             shuffle=False,
             collate_fn=collate_fn,
         )
 
-        logger.info("Starting evaluation...")
+        logger.info(f"Starting evaluation on {target_split} split...")
         eval_metrics = evaluate(
-            model=model, dataloader=val_loader, device=device, task=task
+            model=model, dataloader=eval_loader, device=device, task=task
         )
-        logger.info("Evaluation metrics result:")
+        logger.info(f"Evaluation on {target_split} metrics result:")
         for metric_name, val in eval_metrics.items():
             logger.info(f"  {metric_name}: {val}")
 

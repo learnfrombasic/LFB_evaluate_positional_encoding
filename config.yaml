@@ -1,3 +1,9 @@
+project:
+  name: "LFB-Evaluate-Positional-Encoding"
+  run_name: "LFB-Evaluate-Positional-Encoding"
+  task: "mlm"
+  dataset: "8Opt/bert-mlm-experiments-en"
+
 model:
   vocab_size: 30522
   hidden_size: 768
@@ -38,9 +44,16 @@ training:
   learning_rate: 5.0e-5
   weight_decay: 0.01
   warmup_ratio: 0.1
-  seed: 42
+  seed: 18210
   eval_steps: 100
   save_steps: 200
   checkpoint_dir: "./checkpoints"
   use_wandb: false
-  wandb_project: "LFB-Masked-Language-Modeling"
+  wandb_project: "LFB-Evaluate-Positional-Encoding"
+  wandb_entity: "mlou"
+  wandb_run_name: "LFB-Evaluate-Positional-Encoding"
+  save_best: true
+  save_last: true
+
+logging:
+  level: "info"

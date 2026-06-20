@@ -1,5 +1,6 @@
 import os
 import random
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -25,7 +26,7 @@ from src.utils import (
 logger = setup_logger("train_pipeline")
 
 
-def set_seed(seed: int):
+def set_seed(seed: int) -> None:
     """Set random seeds for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
@@ -35,8 +36,8 @@ def set_seed(seed: int):
 
 
 def get_linear_schedule_with_warmup(
-    optimizer, num_warmup_steps: int, num_training_steps: int
-):
+    optimizer: torch.optim.Optimizer, num_warmup_steps: int, num_training_steps: int
+) -> torch.optim.lr_scheduler.LambdaLR:
     """
     Create a schedule with a learning rate that decreases linearly from the initial lr set in the optimizer to 0,
     after a warmup period during which it increases linearly from 0 to the initial lr.
@@ -54,8 +55,11 @@ def get_linear_schedule_with_warmup(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+# Callbacks are duck-typed and import hooks directly from src/callbacks
+
+
 class Trainer:
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str) -> None:
         self.config = read_yaml(config_path)
         self.device = detect_device()
         logger.info(f"Using device: {self.device}")
@@ -123,29 +127,36 @@ class Trainer:
         self.model.to(self.device)
         count_parameters(self.model)
 
+        self.callbacks: list[Any] = []
+
         # Setup WandB callback
         self.use_wandb = self.training_config.get("use_wandb", False)
-        self.wandb_callback = None
         if self.use_wandb:
             try:
                 from src.callbacks.wandb_callback import WandbCallback
 
-                self.wandb_callback = WandbCallback(
+                wandb_cb = WandbCallback(
                     project_name=self.training_config.get(
                         "wandb_project", "LFB-PE-Eval"
                     ),
                     run_name=self.run_name,
                     config=self.config,
                 )
-                logger.info("Initialized Weights & Biases Logging.")
+                self.callbacks.append(wandb_cb)
+                logger.info("Initialized Weights & Biases Logging Callback.")
             except Exception as e:
                 logger.warning(
                     f"Failed to initialize WandB. Proceeding without WandB. Error: {e}"
                 )
                 self.use_wandb = False
 
-    def setup_dataloaders(self, train_dataset, val_dataset=None):
-        """Prepare train and validation data loaders."""
+    def setup_dataloaders(
+        self,
+        train_dataset: Any,
+        val_dataset: Optional[Any] = None,
+        test_dataset: Optional[Any] = None,
+    ) -> None:
+        """Prepare train, validation, and test data loaders."""
         batch_size = self.training_config.get("batch_size", 16)
 
         train_lfb_ds = LfbDataset(
@@ -173,7 +184,20 @@ class Trainer:
                 val_lfb_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
             )
 
-    def train(self):
+        self.test_loader = None
+        if test_dataset is not None:
+            test_lfb_ds = LfbDataset(
+                dataset=test_dataset,
+                tokenizer=self.tokenizer,
+                max_length=self.tokenizer_config.get("max_length", 512),
+                text_column="text",
+                mlm=(self.task == "mlm"),
+            )
+            self.test_loader = DataLoader(
+                test_lfb_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
+            )
+
+    def train(self) -> None:
         """Main training loop."""
         epochs = self.training_config.get("epochs", 3)
         lr = float(self.training_config.get("learning_rate", 5e-5))
@@ -224,8 +248,16 @@ class Trainer:
         logger.info(f"Warmup Steps: {warmup_steps}")
 
         criterion = get_criterion(self.task)
+        # Checkpoint flags
+        save_best = self.training_config.get("save_best", True)
+        save_last = self.training_config.get("save_last", True)
+        best_val_loss = float("inf")
+
         global_step = 0
         effective_step = 0
+
+        for cb in self.callbacks:
+            cb.on_train_begin(self)
 
         for epoch in range(epochs):
             self.model.train()
@@ -270,15 +302,13 @@ class Trainer:
                     optimizer.zero_grad()
                     effective_step += 1
 
-                    # WandB logging
-                    if self.use_wandb and self.wandb_callback:
-                        self.wandb_callback.log_metrics(
-                            metrics={
-                                "loss": loss.item() * grad_accum_steps,
-                                "lr": scheduler.get_last_lr()[0],
-                            },
+                    # Run callbacks step end
+                    for cb in self.callbacks:
+                        cb.on_step_end(
+                            self,
                             step=effective_step,
-                            prefix="train",
+                            loss=loss.item() * grad_accum_steps,
+                            lr=scheduler.get_last_lr()[0],
                         )
 
                     # Periodic Evaluation
@@ -291,15 +321,29 @@ class Trainer:
                             task=self.task,
                         )
                         logger.info(f"Eval metrics: {eval_metrics}")
-                        if self.use_wandb and self.wandb_callback:
-                            self.wandb_callback.log_metrics(
-                                metrics=eval_metrics, step=effective_step, prefix="eval"
+
+                        # Run callbacks eval
+                        for cb in self.callbacks:
+                            cb.on_evaluate(
+                                self, step=effective_step, metrics=eval_metrics
                             )
+
+                        # Track best model checkpoint
+                        val_loss = eval_metrics.get("loss", float("inf"))
+                        if save_best and val_loss < best_val_loss:
+                            best_val_loss = val_loss
+                            logger.info(
+                                f"New best validation loss: {best_val_loss:.4f}. Saving best checkpoint..."
+                            )
+                            self.save_checkpoint(checkpoint_dir, "best")
+
                         self.model.train()
 
                     # Periodic Checkpointing
                     if effective_step % save_steps == 0:
                         self.save_checkpoint(checkpoint_dir, effective_step)
+                        if save_last:
+                            self.save_checkpoint(checkpoint_dir, "last")
 
                 pbar.set_postfix({"loss": f"{loss.item() * grad_accum_steps:.4f}"})
 
@@ -310,12 +354,31 @@ class Trainer:
 
         # Final Save
         self.save_checkpoint(checkpoint_dir, "final")
+        if save_last:
+            self.save_checkpoint(checkpoint_dir, "last")
 
-        # Cleanup WandB
-        if self.use_wandb and self.wandb_callback:
-            self.wandb_callback.finish()
+        # Evaluate on test set if provided
+        if self.test_loader is not None:
+            logger.info("Running evaluation on test set...")
+            test_metrics = evaluate(
+                model=self.model,
+                dataloader=self.test_loader,
+                device=self.device,
+                task=self.task,
+            )
+            logger.info(f"Final test metrics: {test_metrics}")
 
-    def save_checkpoint(self, checkpoint_dir: str, step_identifier: str | int):
+            # Run callbacks eval for test
+            for cb in self.callbacks:
+                cb.on_evaluate(self, step=effective_step, metrics=test_metrics)
+
+        # Run callbacks train end
+        for cb in self.callbacks:
+            cb.on_train_end(self)
+
+    def save_checkpoint(
+        self, checkpoint_dir: str, step_identifier: Union[str, int]
+    ) -> None:
         """Save training states."""
         save_path = os.path.join(
             checkpoint_dir, self.run_name, f"checkpoint-{step_identifier}"
