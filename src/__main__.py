@@ -5,9 +5,13 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 
-from src.dataset import LfbDataset, collate_fn
+from src.dataset import LfbDataset, TokenClassificationDataset, collate_fn
 from src.models.configs import BertConfig
-from src.models.model import BertMLM
+from src.models.model import (
+    BertForSequenceClassification,
+    BertForTokenClassification,
+    BertMLM,
+)
 from src.models.tokenizer import BertTokenizer
 from src.pipelines.eval import evaluate
 from src.pipelines.train import Trainer
@@ -51,16 +55,24 @@ def main() -> None:
     config = read_yaml(args.config)
     project_config = config.get("project", {})
     dataset_name = project_config.get("dataset", "8Opt/bert-mlm-experiments-en")
+    dataset_config_name = project_config.get("dataset_config")
     task = project_config.get("task", "mlm")
+    text_column = project_config.get("text_column", "text")
+    label_column = project_config.get("label_column")
+
+    def _load_split(split: str):
+        if dataset_config_name:
+            return load_dataset(dataset_name, dataset_config_name, split=split)
+        return load_dataset(dataset_name, split=split)
 
     logger.info(f"Execution Mode: {args.mode}")
     logger.info(f"Loading dataset: {dataset_name} for task: {task}...")
 
     if args.mode == "train":
         # Load dataset splits
-        train_ds = load_dataset(dataset_name, split="train")
-        val_ds = load_dataset(dataset_name, split="validation")
-        test_ds = load_dataset(dataset_name, split="test")
+        train_ds = _load_split("train")
+        val_ds = _load_split("validation")
+        test_ds = _load_split("test")
 
         if args.subset is not None:
             train_ds = train_ds.select(range(min(len(train_ds), args.subset)))
@@ -95,7 +107,7 @@ def main() -> None:
 
         # Load evaluation or test split
         target_split = "validation" if args.mode == "eval" else "test"
-        eval_ds = load_dataset(dataset_name, split=target_split)
+        eval_ds = _load_split(target_split)
 
         if args.subset is not None:
             eval_ds = eval_ds.select(range(min(len(eval_ds), args.subset)))
@@ -128,6 +140,7 @@ def main() -> None:
             ),
             pad_token_id=model_config.get("pad_token_id", 0),
             pre_layer_norm=model_config.get("pre_layer_norm", False),
+            num_labels=model_config.get("num_labels", 2),
             tokenizer_name=tokenizer_name,
             tokenizer_padding=tokenizer_config.get("padding", "max_length"),
             tokenizer_truncation=tokenizer_config.get("truncation", True),
@@ -136,6 +149,10 @@ def main() -> None:
 
         if task == "mlm":
             model = BertMLM(bert_config)
+        elif task == "classification":
+            model = BertForSequenceClassification(bert_config)
+        elif task in ("pos_tagging", "token_classification"):
+            model = BertForTokenClassification(bert_config)
         else:
             raise ValueError(
                 f"Task type '{task}' is not currently supported in evaluation pipeline."
@@ -149,13 +166,23 @@ def main() -> None:
 
         # Setup Dataloader
         tokenizer = BertTokenizer(model_id=tokenizer_name)
-        eval_lfb_ds = LfbDataset(
-            dataset=eval_ds,
-            tokenizer=tokenizer,
-            max_length=tokenizer_config.get("max_length", 512),
-            text_column="text",
-            mlm=(task == "mlm"),
-        )
+        if task in ("pos_tagging", "token_classification"):
+            eval_lfb_ds = TokenClassificationDataset(
+                dataset=eval_ds,
+                tokenizer=tokenizer,
+                max_length=tokenizer_config.get("max_length", 512),
+                tokens_column=project_config.get("tokens_column", "tokens"),
+                tags_column=project_config.get("tags_column", "pos_tags"),
+            )
+        else:
+            eval_lfb_ds = LfbDataset(
+                dataset=eval_ds,
+                tokenizer=tokenizer,
+                max_length=tokenizer_config.get("max_length", 512),
+                text_column=text_column,
+                label_column=label_column,
+                mlm=(task == "mlm"),
+            )
         eval_loader = DataLoader(
             eval_lfb_ds,
             batch_size=config.get("training", {}).get("batch_size", 16),

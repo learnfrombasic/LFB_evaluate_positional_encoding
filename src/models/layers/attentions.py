@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from src.models.configs import BertConfig
+from src.models.layers.positional_encoding import get_pos_encoder
 
 
 class ScaledDotProductAttention(nn.Module):
@@ -32,7 +33,26 @@ class ScaledDotProductAttention(nn.Module):
         self.head_size = config.hidden_size // config.num_attention_heads  # 64
         self.position_embedding_type = getattr(
             config, "position_embedding_type", "absolute"
-        )
+        ).lower()
+
+        # Attention-level positional encodings (rotary/relative/alibi/t5_relative)
+        # live here, since they operate on per-head Q/K or attention scores
+        # rather than on the token embeddings.
+        self.pos_encoder = None
+        level, pe_cls = get_pos_encoder(self.position_embedding_type)
+        if level == "attention":
+            if self.position_embedding_type in ("rotary", "rope", "relative"):
+                self.pos_encoder = pe_cls(
+                    d_model=self.head_size,
+                    max_len=config.max_position_embeddings,
+                )
+            elif self.position_embedding_type == "t5_relative":
+                self.pos_encoder = pe_cls(
+                    num_heads=self.n_head,
+                    max_distance=max(1, config.max_position_embeddings - 1),
+                )
+            elif self.position_embedding_type == "alibi":
+                self.pos_encoder = pe_cls(num_heads=self.n_head)
 
     def forward(
         self, x: torch.Tensor, attention_mask: torch.LongTensor
@@ -67,16 +87,18 @@ class ScaledDotProductAttention(nn.Module):
             1, 2
         )  # (B, nh, T, 64)
 
+        if self.pos_encoder is not None and hasattr(self.pos_encoder, "rotate_qk"):
+            q, k = self.pos_encoder.rotate_qk(q, k)
+
         # attention multiplies the head_size dimension (T,64) x (64,T) = (T,T)
         # (B, nh, T, 64) x (B, nh, 64, T) -> (B, nh, T, T)
         att = q @ k.transpose(2, 3)
         att = att / math.sqrt(self.head_size)
 
-        if self.position_embedding_type.lower() == "alibi":
-            from .positional_encoding import build_alibi_tensor
-
-            alibi_bias = build_alibi_tensor(T, self.n_head, device=att.device)
-            att = att + alibi_bias
+        if self.pos_encoder is not None and hasattr(self.pos_encoder, "attention_bias"):
+            att = att + self.pos_encoder.attention_bias(
+                seq_len=T, device=att.device, dtype=att.dtype, q=q
+            )
 
         # attention mask is a binary mask of shape (B,T) that is 1 for positions we want to attend to
         attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T)

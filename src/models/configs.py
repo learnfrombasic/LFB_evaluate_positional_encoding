@@ -64,6 +64,7 @@ class BertConfig:
     )
     pad_token_id: int = 0
     pre_layer_norm: bool = False
+    num_labels: int = 2
     tokenizer_name: str = "bert-base-uncased"
     tokenizer_padding: Union[str, bool] = True
     tokenizer_truncation: bool = True

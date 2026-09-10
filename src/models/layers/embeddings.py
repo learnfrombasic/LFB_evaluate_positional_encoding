@@ -27,12 +27,14 @@ class BertEmbeddings(nn.Module):
         self.position_embedding_type = getattr(
             config, "position_embedding_type", "absolute"
         )
-        pos_encoder_cls = get_pos_encoder(self.position_embedding_type)
-        self.position_embeddings = pos_encoder_cls(
-            d_model=config.hidden_size,
-            dropout=0.0,  # TODO: this must be configureable via config.yaml
-            max_len=config.max_position_embeddings,
-        )
+        self.pe_level, pos_encoder_cls = get_pos_encoder(self.position_embedding_type)
+        self.position_embeddings = None
+        if self.pe_level == "embedding":
+            self.position_embeddings = pos_encoder_cls(
+                d_model=config.hidden_size,
+                dropout=0.0,  # TODO: this must be configureable via config.yaml
+                max_len=config.max_position_embeddings,
+            )
 
         self.word_embeddings = nn.Embedding(
             config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
@@ -72,11 +74,14 @@ class BertEmbeddings(nn.Module):
         tok_type_emb = self.token_type_embeddings(token_type_ids)  # (B,T,768)
         x = word_emb + tok_type_emb
 
-        pe_out = self.position_embeddings(x)
-        if self.position_embedding_type.lower() == "temporal":
-            x = x + pe_out
-        else:
-            x = pe_out
+        # Attention-level schemes (rotary/relative/alibi/t5_relative) add no
+        # positional signal here - they act inside each attention layer instead.
+        if self.pe_level == "embedding":
+            pe_out = self.position_embeddings(x)
+            if self.position_embedding_type.lower() == "temporal":
+                x = x + pe_out
+            else:
+                x = pe_out
 
         # LayerNorm stabilizes the combined embeddings by ensuring zero mean and unit variance
         if not self.pre_layer_norm:

@@ -4,8 +4,12 @@ import torch.nn as nn
 
 class MLMCriterion(nn.Module):
     """
-    Criterion for Masked Language Modeling (MLM).
-    Computes Cross Entropy Loss on 3D logits against 2D labels, ignoring the padding/unmasked tokens.
+    Criterion for any per-token task with an ignore-label (MLM pretraining,
+    or token classification like POS tagging/NER): computes Cross Entropy
+    Loss on 3D logits (batch, seq_len, num_classes) against 2D labels
+    (batch, seq_len), ignoring positions marked -100 (padding/unmasked
+    tokens for MLM; special tokens/continuation subwords for token
+    classification - see TokenClassificationDataset).
     """
 
     def __init__(self, ignore_index: int = -100):
@@ -39,7 +43,9 @@ def get_criterion(task_name: str, **kwargs) -> nn.Module:
     Helper function to instantiate task-specific loss criteria.
     """
     task_name = task_name.lower()
-    if task_name == "mlm":
+    if task_name in ("mlm", "pos_tagging", "token_classification"):
+        # Same shape contract (3D logits, 2D labels, -100 = ignore) for MLM
+        # and any per-token classification task.
         ignore_index = kwargs.get("ignore_index", -100)
         return MLMCriterion(ignore_index=ignore_index)
     elif task_name == "classification":

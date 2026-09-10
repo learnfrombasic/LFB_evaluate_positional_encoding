@@ -87,17 +87,83 @@ class LfbDataset(Dataset):
         return labels
 
 
+class TokenClassificationDataset(Dataset):
+    """Per-token tasks (POS tagging, NER, ...): input is pre-tokenized into
+    words with one label per word (CoNLL-2003 style). Subword tokenization
+    splits words into multiple pieces, so labels must be realigned: each
+    word's label is assigned only to its first subword; special tokens
+    ([CLS]/[SEP]/[PAD]) and continuation subwords get -100 (ignored by the
+    loss), following the standard HuggingFace token-classification recipe.
+    """
+
+    def __init__(
+        self,
+        dataset: datasets.Dataset,
+        tokenizer: BertTokenizer,
+        max_length: int = 128,
+        tokens_column: str = "tokens",
+        tags_column: str = "pos_tags",
+    ):
+        self.dataset = dataset
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.tokens_column = tokens_column
+        self.tags_column = tags_column
+
+        if tokens_column not in dataset.column_names:
+            raise ValueError(f"Column '{tokens_column}' not found")
+        if tags_column not in dataset.column_names:
+            raise ValueError(f"Column '{tags_column}' not found")
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> dict:
+        item = self.dataset[idx]
+        words = item[self.tokens_column]
+        tags = item[self.tags_column]
+
+        encoded = self.tokenizer.encode(
+            words,
+            max_length=self.max_length,
+            truncation=True,
+            padding="max_length",
+            return_tensors=None,
+            is_split_into_words=True,
+        )
+
+        word_ids = encoded.word_ids()
+        labels = []
+        previous_word_id = None
+        for word_id in word_ids:
+            if word_id is None or word_id == previous_word_id:
+                labels.append(-100)
+            else:
+                labels.append(tags[word_id])
+            previous_word_id = word_id
+
+        return {
+            "input_ids": encoded["input_ids"],
+            "attention_mask": encoded["attention_mask"],
+            "labels": labels,
+        }
+
+
 def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
-    """Convert batch dicts to stacked tensors."""
+    """Convert batch dicts to stacked tensors.
+
+    Handles both per-token fields (input_ids, attention_mask, MLM labels -
+    lists of ints) and per-example scalar fields (classification labels -
+    plain ints), since `torch.stack` only accepts already-built tensors.
+    """
     output = {}
 
     for key in batch[0].keys():
         values = [item[key] for item in batch]
 
-        # Convert to tensor
-        if isinstance(values[0], list):
-            output[key] = torch.tensor(values, dtype=torch.long)
-        else:
+        if isinstance(values[0], torch.Tensor):
             output[key] = torch.stack(values)
+        else:
+            output[key] = torch.tensor(values, dtype=torch.long)
 
     return output

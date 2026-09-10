@@ -53,6 +53,12 @@ training:
   wandb_run_name: "LFB-Masked-Language-Modeling"
   save_best: true
   save_last: true
+  # Mixed precision only activates on CUDA (no-op elsewhere) - see docs/2026-09-10/machine-eval.md
+  mixed_precision: true
+  # Optional cap on optimizer steps, useful for short comparative runs; null = train full epochs
+  max_steps: null
+  # Path to a checkpoint dir (e.g. "./checkpoints/<run>/checkpoint-last") to resume from; null = fresh run
+  resume_from: null
 
 logging:
   level: "info"

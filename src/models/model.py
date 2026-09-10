@@ -5,6 +5,21 @@ from src.models.configs import BertConfig
 from src.models.layers import BertBlock, BertEmbeddings
 
 
+def init_bert_weights(module: nn.Module, initializer_range: float) -> None:
+    """Shared weight-init policy for every BERT head (MLM, classification, ...)."""
+    if isinstance(module, nn.Linear):
+        module.weight.data.normal_(mean=0.0, std=initializer_range)
+        if module.bias is not None:
+            module.bias.data.zero_()
+    elif isinstance(module, nn.Embedding):
+        module.weight.data.normal_(mean=0.0, std=initializer_range)
+        if module.padding_idx is not None:
+            module.weight.data[module.padding_idx].zero_()
+    elif isinstance(module, nn.LayerNorm):
+        module.bias.data.zero_()
+        module.weight.data.fill_(1.0)
+
+
 class BertModel(nn.Module):
     """
     BERT model ("Bidirectional Encoder Representations from Transformers").
@@ -92,23 +107,7 @@ class BertMLM(nn.Module):
         self.head[-1].weight = self.bert.embeddings.word_embeddings.weight
 
         # Initialize weights
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        """Initialize the weights"""
-        if isinstance(module, nn.Linear):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
+        self.apply(lambda m: init_bert_weights(m, config.initializer_range))
 
     def forward(
         self,
@@ -134,3 +133,88 @@ class BertMLM(nn.Module):
         x = self.bert(input_ids, attention_mask, token_type_ids)
         x = self.head(x) + self.bias
         return x
+
+
+class BertForSequenceClassification(nn.Module):
+    """
+    BERT model with a sequence classification head, for downstream tasks
+    (e.g. GLUE-style single-sentence or sentence-pair classification).
+
+    Pools the [CLS] token (position 0) through a Linear+Tanh, matching the
+    standard BERT pooler, then a dropout + linear classifier.
+
+    Args:
+        config: BertConfig
+            Configuration for the BERT model. `config.num_labels` sets the
+            classifier's output dimension.
+    """
+
+    def __init__(self, config: BertConfig):
+        super().__init__()
+        self.config = config
+        self.bert = BertModel(config)
+        self.pooler_dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.pooler_activation = nn.Tanh()
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+
+        self.apply(lambda m: init_bert_weights(m, config.initializer_range))
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.LongTensor,
+        token_type_ids: torch.LongTensor,
+        **kwargs,
+    ):
+        """
+        Forward pass for the BERT model with a sequence classification head.
+
+        Returns:
+            torch.Tensor: Logits of shape (batch_size, num_labels).
+        """
+        x = self.bert(input_ids, attention_mask, token_type_ids)
+        cls_token = x[:, 0]
+        pooled = self.pooler_activation(self.pooler_dense(cls_token))
+        pooled = self.dropout(pooled)
+        return self.classifier(pooled)
+
+
+class BertForTokenClassification(nn.Module):
+    """
+    BERT model with a per-token classification head, for tasks like POS
+    tagging or NER (CoNLL-2003 style): every position in the sequence gets
+    its own label, unlike sequence classification's single pooled [CLS]
+    prediction.
+
+    Args:
+        config: BertConfig
+            Configuration for the BERT model. `config.num_labels` sets the
+            classifier's output dimension (e.g. 47 for CoNLL-2003 POS tags).
+    """
+
+    def __init__(self, config: BertConfig):
+        super().__init__()
+        self.config = config
+        self.bert = BertModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+
+        self.apply(lambda m: init_bert_weights(m, config.initializer_range))
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.LongTensor,
+        token_type_ids: torch.LongTensor,
+        **kwargs,
+    ):
+        """
+        Forward pass for the BERT model with a per-token classification head.
+
+        Returns:
+            torch.Tensor: Logits of shape (batch_size, seq_len, num_labels).
+        """
+        x = self.bert(input_ids, attention_mask, token_type_ids)
+        x = self.dropout(x)
+        return self.classifier(x)

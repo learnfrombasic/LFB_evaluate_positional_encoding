@@ -63,8 +63,10 @@ def evaluate(
             loss = criterion(logits, labels)
 
             # Metric calculation based on task
-            if task == "mlm":
-                # Calculate accuracy on masked tokens only
+            if task in ("mlm", "pos_tagging", "token_classification"):
+                # Calculate accuracy on non-ignored positions only: masked
+                # tokens for MLM, or real (non-special, first-subword)
+                # tokens for token classification - both use -100 elsewhere.
                 masked_mask = labels != -100
                 predictions = torch.argmax(logits, dim=-1)
 

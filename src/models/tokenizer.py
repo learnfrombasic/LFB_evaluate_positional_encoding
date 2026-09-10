@@ -16,8 +16,15 @@ class BertTokenizer:
         truncation: bool = True,
         max_length: int | None = 512,
         return_tensors: str | None = "pt",
+        is_split_into_words: bool = False,
     ) -> dict[str, torch.Tensor]:
-        """Encodes a string or list of strings into token IDs and attention masks."""
+        """Encodes a string or list of strings into token IDs and attention masks.
+
+        `is_split_into_words=True` treats `text` as a pre-tokenized list of
+        words (e.g. CoNLL-style token classification data) rather than a raw
+        string; the returned encoding then exposes `.word_ids()` for
+        subword-to-word label alignment.
+        """
         return self.tokenizer(
             text,
             padding=padding,
@@ -25,6 +32,7 @@ class BertTokenizer:
             max_length=max_length,
             return_tensors=return_tensors,
             return_attention_mask=True,
+            is_split_into_words=is_split_into_words,
         )
 
     def decode(self, token_ids: list[int], skip_special_tokens: bool = True) -> str:

@@ -1,0 +1,4 @@
+pytest>=8.0
+matplotlib==3.11.1
+nbconvert>=7.0
+ipykernel>=6.0
