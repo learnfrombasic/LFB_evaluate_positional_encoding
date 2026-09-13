@@ -51,7 +51,7 @@ DOCS_DIR = ROOT / "docs" / date.today().isoformat()
 BASE_CONFIG_PATH = ROOT / "configs" / "experiment.yaml"
 CHECKPOINT_ROOT = ROOT / "checkpoints" / "experiments"
 
-# Same 8 schemes as the main comparison; family split used in the report.
+# Same schemes as the main comparison; family split used in the report.
 PE_TYPES = [
     "absolute",
     "tape",
@@ -61,8 +61,16 @@ PE_TYPES = [
     "relative",
     "alibi",
     "t5_relative",
+    "kerple",
+    "xpos",
+    "none",
 ]
-ATTENTION_LEVEL = {"rotary", "relative", "alibi", "t5_relative"}
+ATTENTION_LEVEL = {"rotary", "relative", "alibi", "t5_relative", "kerple", "xpos"}
+# NoPE is embedding-level by registry classification, but - being a true
+# parameter-free identity - it never hits a length ceiling either; labeled
+# separately so the report doesn't imply it shares the embedding-level
+# schemes' fixed-table failure mode.
+NO_LAYER = {"none", "nope"}
 
 TRAIN_LENGTH = 64  # what these checkpoints were actually trained at
 EVAL_LENGTHS = [64, 128, 256]
@@ -189,7 +197,12 @@ def write_report(rows: list[dict]) -> None:
         by_type.setdefault(r["pe_type"], {})[r["length"]] = r
 
     for pe_type in PE_TYPES:
-        layer = "attention" if pe_type in ATTENTION_LEVEL else "embedding"
+        if pe_type in ATTENTION_LEVEL:
+            layer = "attention"
+        elif pe_type in NO_LAYER:
+            layer = "(none)"
+        else:
+            layer = "embedding"
         cells = []
         for length in EVAL_LENGTHS:
             r = by_type[pe_type][length]

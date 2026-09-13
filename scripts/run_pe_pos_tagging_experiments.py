@@ -59,6 +59,9 @@ PE_TYPES = [
     "relative",
     "alibi",
     "t5_relative",
+    "kerple",
+    "xpos",
+    "none",
 ]
 
 TRAIN_SUBSET = 3000
@@ -149,7 +152,7 @@ def write_summary(rows: list[tuple[str, dict | None, float, str | None]]) -> Non
     lines = [
         "# PE comparative experiment summary: CoNLL-2003 POS tagging",
         "",
-        "Same 8 PE schemes as the MLM and SST-2 comparisons, trained from "
+        f"Same {len(PE_TYPES)} PE schemes as the MLM and SST-2 comparisons, trained from "
         f"scratch on a {TRAIN_SUBSET}-sentence subset of CoNLL-2003, "
         "evaluated on the full 3250-sentence validation split. Majority-tag "
         "baseline (always predict the most common POS tag) measured "

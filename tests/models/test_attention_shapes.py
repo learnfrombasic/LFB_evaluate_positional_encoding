@@ -19,6 +19,8 @@ PE_TYPES = [
     "relative",
     "alibi",
     "t5_relative",
+    "kerple",
+    "xpos",
     "none",
     "nope",
 ]

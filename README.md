@@ -6,11 +6,16 @@ This repository builds a BERT-style transformer encoder from scratch in
 PyTorch to study one specific question: how much does positional encoding
 (PE) choice actually matter, and for what?
 
-It implements 9 PE schemes behind a single config switch, and compares them
-across four genuinely different tasks - masked language modeling, length
-generalization, sentence classification, and token classification (POS
-tagging) - plus a data-augmentation robustness study that tests *why* the
-differences appear, not just that they do.
+It implements 11 PE schemes behind a single config switch, and compares them
+across six genuinely different tasks - masked language modeling, length
+generalization, single-sentence classification, sentence-*pair* natural
+language inference, and two flavors of token classification (POS tagging,
+named-entity recognition) - plus a data-augmentation robustness study that
+tests *why* the differences appear, not just that they do.
+
+Every run logs metrics to Weights & Biases by default (set `use_wandb:
+false` in a config to keep a run fully local); model weights are never
+uploaded automatically either way - see "Logging" below.
 
 > [!NOTE]
 > Everything here runs on CPU (see `docs/2026-09-10/machine-eval.md`) - the
@@ -45,18 +50,23 @@ Full write-ups live in `docs/2026-09-10/`; short version:
 
 - `src/models/layers/positional_encoding/` - one file per scheme
   (`sinusoidal.py`, `learnable.py`, `rotary.py`, `relative.py`, `alibi.py`,
-  `t5_relative.py`, `identity.py`), registered in `__init__.py`'s
-  `get_pos_encoder`.
+  `t5_relative.py`, `kerple.py`, `xpos.py`, `identity.py`), registered in
+  `__init__.py`'s `get_pos_encoder`.
 - `src/models/model.py` - `BertMLM`, `BertForSequenceClassification`,
   `BertForTokenClassification`: one shared BERT encoder (`BertModel`),
-  three task heads.
+  three task heads. `BertForTokenClassification` serves both POS tagging
+  and NER (same code path, different `tags_column`/`num_labels`);
+  `BertForSequenceClassification` serves both SST-2 (single sentence) and
+  RTE/NLI (sentence pair, via `LfbDataset`'s `text_pair_column`).
 - `src/pipelines/` - `train.py` (`Trainer`, with `_train_one_epoch` /
   `_run_periodic_evaluation` as the reusable per-epoch and per-evaluation
   units), `eval.py` (`evaluate()`, the single eval pass shared by training
   and CLI eval mode), `criterions.py`.
 - `scripts/` - one driver per experiment: `run_pe_experiments.py` (MLM),
   `run_pe_classification_experiments.py` (SST-2),
-  `run_pe_pos_tagging_experiments.py` (CoNLL-2003),
+  `run_pe_pos_tagging_experiments.py` (CoNLL-2003 POS),
+  `run_pe_ner_experiments.py` (CoNLL-2003 NER),
+  `run_pe_nli_experiments.py` (GLUE RTE),
   `eval_length_generalization.py` (reuses the MLM checkpoints, no
   retraining), `run_pe_word_shuffle_experiment.py`,
   `run_pe_span_cutoff_experiment.py`.
@@ -100,6 +110,8 @@ once to `data/`, then runs every PE type sequentially, writing results to
 python scripts/run_pe_experiments.py                 # MLM comparison
 python scripts/run_pe_classification_experiments.py  # SST-2 classification
 python scripts/run_pe_pos_tagging_experiments.py      # CoNLL-2003 POS tagging
+python scripts/run_pe_ner_experiments.py              # CoNLL-2003 NER
+python scripts/run_pe_nli_experiments.py              # GLUE RTE (sentence-pair NLI)
 python scripts/eval_length_generalization.py          # train-short-test-long
 python scripts/run_pe_word_shuffle_experiment.py      # word-order robustness
 python scripts/run_pe_span_cutoff_experiment.py       # span-gap robustness
@@ -110,6 +122,25 @@ Run the test suite (CPU-only, no network or GPU required):
 ```bash
 pytest tests/ -q
 ```
+
+## Logging
+
+Every config ships with `use_wandb: true` - training metrics (loss, lr,
+eval loss/accuracy) are logged to Weights & Biases per run, in addition to
+stdout, via `WandbCallback`. Set `wandb_project`/`wandb_entity` in a config
+to control where a given run lands (`wandb_entity: null` defaults to the
+authenticated account). Set `use_wandb: false` in a config to keep a run
+fully local (stdout + the local checkpoint directory only, nothing
+uploaded).
+
+Model *weights* are never uploaded automatically either way: `WandbCallback`
+only logs scalar metrics unless you explicitly call its `log_artifact(...)`
+method, and `src/callbacks/hf_callback.py`'s `push_to_hub_callback(...)` can
+push a full checkpoint folder to the Hugging Face Hub - both exist for when
+you want to share/back up a specific checkpoint externally, but neither is
+wired into the training loop by default. Checkpoints and datasets always
+stay local under `./checkpoints/` and `./data/` (both gitignored)
+regardless of the W&B setting.
 
 ## Supported positional encodings
 
@@ -125,6 +156,8 @@ Set `model.position_embedding_type` in any config to one of:
 | `relative` | Shaw et al. (2018) | attention |
 | `alibi` | ALiBi (Press et al., 2021) | attention |
 | `t5_relative` | T5-style bucketed relative (Raffel et al., 2019) | attention |
+| `kerple` | KERPLE, learnable log-distance bias (Chi et al., 2022) | attention |
+| `xpos` | xPos, RoPE + relative-distance decay (Sun et al., 2022) | attention |
 | `none` / `nope` | No positional encoding (scientific control) | - |
 
 `temporal` (return-encoding-only sinusoidal) is also supported for

@@ -1,25 +1,29 @@
-"""Runs the same comparative PE study as scripts/run_pe_experiments.py, but
-on a genuinely different task: single-sentence sentiment classification
-(GLUE SST-2), instead of masked language modeling.
+"""Runs the same comparative PE study as the other task runners, on a fourth
+structurally different task: named-entity recognition (CoNLL-2003 NER) -
+per-token BIO-tagged classification (9 classes: O, B/I-PER, B/I-ORG, B/I-LOC,
+B/I-MISC), reusing the exact `tokens`/`ner_tags` columns already present in
+the CoNLL-2003 parquet files downloaded for the POS-tagging runner.
 
-Why this exists: the MLM comparison and the length-generalization study both
-show PE choice matters for language modeling and for handling sequences
-longer than training. Neither shows whether it matters for a downstream task
-someone would actually deploy. This trains a small `BertForSequenceClassification`
-head from scratch (no MLM pretraining reused - a clean, self-contained signal
-about PE's effect on supervised classification) per PE type, on the same
-seed/subset/step budget throughout, and reports validation accuracy.
+Why this exists alongside POS tagging rather than instead of it: POS tagging
+is largely solvable from word identity alone (see
+docs/2026-09-10/nope-baseline-finding.md - a per-word majority-tag baseline
+already gets ~83%). NER is a genuinely different structural test even though
+it reuses the same sentences and the same per-token classification head:
+entity spans require recognizing *boundaries* (where a B- tag starts vs an
+I- tag continues) and often depend on multi-word context (e.g.
+disambiguating a capitalized word as a person vs. organization from
+surrounding tokens) - a task where position/order plausibly matters more
+than for POS tagging's largely local, word-identity-driven decisions.
 
-Data: `nyu-mll/glue`'s `sst2` config is tiny (~3MB train, <0.1MB validation) -
-downloaded in full via hf_hub_download (see data/sst2_{train,validation}.parquet),
-no shard-limiting tricks needed (unlike the 15GB MLM dataset). GLUE's official
-test split has no public labels, so validation is used for both periodic and
-final evaluation, exactly like the local test-shard reuse in the MLM runner.
+Data/task plumbing: identical to the POS-tagging runner (same
+`TokenClassificationDataset`, same `task: token_classification` code path in
+`Trainer` - see `configs/experiment_ner.yaml`), just pointed at `ner_tags`
+instead of `pos_tags` and with `num_labels=9` instead of 47. No source
+changes were needed to add this task.
 
-Safety: same guardrails as scripts/run_pe_experiments.py - runs execute
-strictly sequentially, in-process; each run is capped by both
-`training.max_steps` and a wall-clock SIGALRM timeout; a failing/hanging run
-is recorded and skipped rather than aborting the matrix; a result note is
+Safety: identical guardrails to the other runners - strictly sequential,
+in-process; each run capped by `training.max_steps` and a wall-clock SIGALRM
+timeout; a failing/hanging run is recorded and skipped; a result note is
 written immediately after each run finishes.
 """
 
@@ -40,11 +44,11 @@ from datasets import load_dataset  # noqa: E402
 from src.pipelines.train import Trainer  # noqa: E402
 from src.utils import read_yaml, setup_logger, write_yaml  # noqa: E402
 
-logger = setup_logger("pe_classification_experiments")
+logger = setup_logger("pe_ner_experiments")
 
-ROOT_DOCS = ROOT / "docs" / date.today().isoformat()
-BASE_CONFIG_PATH = ROOT / "configs" / "experiment_classification.yaml"
-EXPERIMENT_CONFIG_DIR = ROOT / "configs" / "experiments_classification"
+DOCS_DIR = ROOT / "docs" / date.today().isoformat()
+BASE_CONFIG_PATH = ROOT / "configs" / "experiment_ner.yaml"
+EXPERIMENT_CONFIG_DIR = ROOT / "configs" / "experiments_ner"
 
 PE_TYPES = [
     "absolute",
@@ -74,15 +78,15 @@ def _alarm_handler(signum, frame):
 
 
 def load_local_splits():
-    """Loads the full local SST-2 parquet files and takes a subset of train.
-    Validation (872 rows) is used whole - GLUE's real test split has no
-    public labels, so validation stands in for both periodic and final eval.
+    """Loads the full local CoNLL-2003 parquet files (already downloaded by
+    the POS-tagging runner) and takes a subset of train. The full validation
+    split (3250 sentences) is used for both periodic and final evaluation.
     """
     ds = load_dataset(
         "parquet",
         data_files={
-            "train": str(ROOT / "data" / "sst2_train.parquet"),
-            "validation": str(ROOT / "data" / "sst2_validation.parquet"),
+            "train": str(ROOT / "data" / "conll2003_train.parquet"),
+            "validation": str(ROOT / "data" / "conll2003_validation.parquet"),
         },
     )
     train_ds = ds["train"].shuffle(seed=SPLIT_SEED).select(range(TRAIN_SUBSET))
@@ -93,9 +97,9 @@ def load_local_splits():
 def write_results_note(
     pe_type: str, metrics: dict | None, duration_s: float, error: str | None
 ) -> None:
-    ROOT_DOCS.mkdir(parents=True, exist_ok=True)
-    path = ROOT_DOCS / f"classification-results-{pe_type}.md"
-    lines = [f"# SST-2 classification result: `{pe_type}`", ""]
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    path = DOCS_DIR / f"ner-results-{pe_type}.md"
+    lines = [f"# NER result: `{pe_type}`", ""]
     lines.append(f"- Duration: {duration_s:.1f}s")
     if error:
         lines.append(f"- **Status: FAILED** - {error}")
@@ -114,7 +118,7 @@ def run_one(pe_type: str, train_ds, val_ds) -> tuple[dict | None, float, str | N
     config = copy.deepcopy(base_config)
     config["model"]["position_embedding_type"] = pe_type
     config["training"]["checkpoint_dir"] = str(
-        ROOT / "checkpoints" / "experiments_classification" / pe_type
+        ROOT / "checkpoints" / "experiments_ner" / pe_type
     )
 
     EXPERIMENT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -127,8 +131,6 @@ def run_one(pe_type: str, train_ds, val_ds) -> tuple[dict | None, float, str | N
     trainer = None
     try:
         trainer = Trainer(config_path=str(config_path))
-        # Validation stands in for both periodic eval and the final "test"
-        # metrics `train()` reports - see module docstring.
         trainer.setup_dataloaders(
             train_dataset=train_ds, val_dataset=val_ds, test_dataset=val_ds
         )
@@ -146,14 +148,17 @@ def run_one(pe_type: str, train_ds, val_ds) -> tuple[dict | None, float, str | N
 
 
 def write_summary(rows: list[tuple[str, dict | None, float, str | None]]) -> None:
-    path = ROOT_DOCS / "classification-results-summary.md"
+    path = DOCS_DIR / "ner-results-summary.md"
     lines = [
-        "# PE comparative experiment summary: SST-2 sentiment classification",
+        "# PE comparative experiment summary: CoNLL-2003 NER",
         "",
-        f"Same {len(PE_TYPES)} PE schemes as the MLM comparison, now fine-tuned from scratch "
-        f"(no MLM pretraining reused) on a {TRAIN_SUBSET}-row subset of GLUE "
-        "SST-2, evaluated on the full 872-row validation split (GLUE's real "
-        "test split has no public labels). Random-guess baseline is 50%.",
+        f"Same {len(PE_TYPES)} PE schemes as the other task comparisons, trained "
+        f"from scratch on a {TRAIN_SUBSET}-sentence subset of CoNLL-2003 (same "
+        "sentences as the POS-tagging runner, `ner_tags` instead of "
+        "`pos_tags`), evaluated on the full 3250-sentence validation split. "
+        "9 BIO classes - a majority-class ('O') baseline should be computed "
+        "empirically before reading these numbers as evidence of anything, "
+        "the same caveat nope-baseline-finding.md raises for POS tagging.",
         "",
         "| PE type | loss | accuracy | duration (s) | status |",
         "|---|---|---|---|---|",
@@ -172,7 +177,7 @@ def write_summary(rows: list[tuple[str, dict | None, float, str | None]]) -> Non
 
 
 def main() -> None:
-    ROOT_DOCS.mkdir(parents=True, exist_ok=True)
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
     train_ds, val_ds = load_local_splits()
     logger.info(f"Loaded subsets: train={len(train_ds)}, validation={len(val_ds)}")
 

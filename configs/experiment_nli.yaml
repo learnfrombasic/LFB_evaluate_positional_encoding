@@ -1,0 +1,62 @@
+project:
+  name: "Learn From Basics - LFB"
+  task: "classification"
+  dataset: "nyu-mll/glue"
+  dataset_config: "rte"
+  text_column: "sentence1"
+  text_pair_column: "sentence2"
+  label_column: "label"
+
+model:
+  vocab_size: 30522
+  hidden_size: 256
+  num_hidden_layers: 2
+  num_attention_heads: 4
+  intermediate_size: 1024
+  hidden_dropout_prob: 0.1
+  attention_probs_dropout_prob: 0.1
+  max_position_embeddings: 128 # RTE sentences run much longer than SST-2's
+  type_vocab_size: 2
+  initializer_range: 0.02
+  layer_norm_eps: 1.0e-12
+  num_labels: 2 # entailment / not_entailment
+
+  # Overridden per-run by scripts/run_pe_nli_experiments.py
+  position_embedding_type: "absolute"
+
+  pad_token_id: 0
+  pre_layer_norm: false
+
+tokenizer:
+  name: "bert-base-uncased"
+  padding: "max_length"
+  truncation: true
+  max_length: 128
+
+training:
+  # RTE's full train split is only 2490 rows; a few epochs over it all,
+  # no subsetting needed (unlike SST-2's 67k-row train split).
+  epochs: 8
+  batch_size: 16
+  gradient_accumulation_steps: 1
+  # Same reasoning as the SST-2/POS-tagging configs: training from full
+  # random init needs a larger LR than MLM fine-tuning's 5e-5.
+  learning_rate: 3.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  seed: 18210
+  eval_steps: 156 # once per epoch (2490 / 16 ~= 156 steps/epoch)
+  save_steps: 100000 # effectively disabled for this short run; only final/best are saved
+  checkpoint_dir: "./checkpoints/experiments_nli"
+  use_wandb: true
+  wandb_project: "LFB-PE-NLI-Experiments"
+  wandb_entity: null # defaults to the authenticated account
+  wandb_run_name: "LFB-PE-NLI-Experiment"
+  save_best: true
+  save_last: true
+  mixed_precision: true # no-op on CPU, see docs/2026-09-10/machine-eval.md
+  max_steps: null # let all epochs run; the driver's own SIGALRM timeout is the safety net
+  resume_from: null
+
+logging:
+  level: "info"

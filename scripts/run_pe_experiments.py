@@ -57,6 +57,9 @@ PE_TYPES = [
     "relative",
     "alibi",
     "t5_relative",
+    "kerple",
+    "xpos",
+    "none",
 ]
 
 TRAIN_SUBSET = 2000

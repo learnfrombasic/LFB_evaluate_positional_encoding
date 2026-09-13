@@ -15,12 +15,14 @@ from functools import partial
 
 from .alibi import ALiBiPositionalEncoding
 from .identity import NoPositionalEncoding
+from .kerple import KerplePositionalEncoding
 from .learnable import LearnablePositionalEncoding
 from .misc import ConvSPE, SineSPE, VariablePositionalEncoding
 from .relative import RelativePositionalEncoding
 from .rotary import RotaryPositionalEncoding
 from .sinusoidal import SinusoidalPositionalEncoding
 from .t5_relative import T5RelativePositionalEncoding, get_relative_positions
+from .xpos import XPosPositionalEncoding
 
 __all__ = [
     "SinusoidalPositionalEncoding",
@@ -29,6 +31,8 @@ __all__ = [
     "RelativePositionalEncoding",
     "ALiBiPositionalEncoding",
     "T5RelativePositionalEncoding",
+    "KerplePositionalEncoding",
+    "XPosPositionalEncoding",
     "NoPositionalEncoding",
     "SineSPE",
     "ConvSPE",
@@ -55,6 +59,8 @@ _ATTENTION_LEVEL = {
     "relative": RelativePositionalEncoding,
     "alibi": ALiBiPositionalEncoding,
     "t5_relative": T5RelativePositionalEncoding,
+    "kerple": KerplePositionalEncoding,
+    "xpos": XPosPositionalEncoding,
 }
 
 

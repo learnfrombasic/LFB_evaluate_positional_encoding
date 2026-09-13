@@ -231,3 +231,5 @@ configs/experiments_classification/
 configs/experiments_pos_tagging/
 configs/experiments_word_shuffle/
 configs/experiments_span_cutoff/
+configs/experiments_ner/
+configs/experiments_nli/

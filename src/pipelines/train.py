@@ -205,6 +205,7 @@ class Trainer:
             tokenizer=self.tokenizer,
             max_length=max_length,
             text_column=self.project_config.get("text_column", "text"),
+            text_pair_column=self.project_config.get("text_pair_column"),
             label_column=self.project_config.get("label_column"),
             mlm=(self.task == "mlm"),
         )

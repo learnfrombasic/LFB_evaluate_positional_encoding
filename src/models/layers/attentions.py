@@ -41,7 +41,7 @@ class ScaledDotProductAttention(nn.Module):
         self.pos_encoder = None
         level, pe_cls = get_pos_encoder(self.position_embedding_type)
         if level == "attention":
-            if self.position_embedding_type in ("rotary", "rope", "relative"):
+            if self.position_embedding_type in ("rotary", "rope", "relative", "xpos"):
                 self.pos_encoder = pe_cls(
                     d_model=self.head_size,
                     max_len=config.max_position_embeddings,
@@ -51,7 +51,7 @@ class ScaledDotProductAttention(nn.Module):
                     num_heads=self.n_head,
                     max_distance=max(1, config.max_position_embeddings - 1),
                 )
-            elif self.position_embedding_type == "alibi":
+            elif self.position_embedding_type in ("alibi", "kerple"):
                 self.pos_encoder = pe_cls(num_heads=self.n_head)
 
     def forward(

@@ -1,26 +1,32 @@
-"""Runs the same comparative PE study as scripts/run_pe_experiments.py, but
-on a genuinely different task: single-sentence sentiment classification
-(GLUE SST-2), instead of masked language modeling.
+"""Runs the same comparative PE study as the other task runners, on a fifth
+structurally different task: natural language inference (GLUE RTE) -
+sentence-*pair* classification (entailment / not_entailment), instead of
+MLM, single-sentence classification (SST-2), or per-token classification
+(POS tagging / NER).
 
-Why this exists: the MLM comparison and the length-generalization study both
-show PE choice matters for language modeling and for handling sequences
-longer than training. Neither shows whether it matters for a downstream task
-someone would actually deploy. This trains a small `BertForSequenceClassification`
-head from scratch (no MLM pretraining reused - a clean, self-contained signal
-about PE's effect on supervised classification) per PE type, on the same
-seed/subset/step budget throughout, and reports validation accuracy.
+Why this exists: every other task in this project feeds the model exactly
+one segment (`token_type_ids` implicitly all zeros - see `LfbDataset` /
+`Trainer`/`evaluate()`'s default-to-zeros fallback). NLI is the first task
+here where the model actually needs to relate *two* segments (premise,
+hypothesis) separated by a real `[SEP]` and a real `token_type_ids` boundary
+(1s over the second segment) - `type_vocab_size=2` in `BertConfig` existed
+for exactly this case but was previously unused as long as every task was
+single-segment. This tests whether PE choice matters differently when the
+model must reason about relative position *across* a segment boundary, not
+just within a single contiguous span.
 
-Data: `nyu-mll/glue`'s `sst2` config is tiny (~3MB train, <0.1MB validation) -
-downloaded in full via hf_hub_download (see data/sst2_{train,validation}.parquet),
-no shard-limiting tricks needed (unlike the 15GB MLM dataset). GLUE's official
-test split has no public labels, so validation is used for both periodic and
-final evaluation, exactly like the local test-shard reuse in the MLM runner.
+Data: `nyu-mll/glue`'s `rte` config (Recognizing Textual Entailment) - small
+(2490 train / 277 validation rows, both tiny relative to SST-2's 67k train
+rows), downloaded once and cached locally as
+`data/nli_{train,validation}.parquet`, exactly like the SST-2 and
+CoNLL-2003 runners. GLUE's official RTE test split has no public labels, so
+validation is used for both periodic and final evaluation, same as the
+SST-2 runner.
 
-Safety: same guardrails as scripts/run_pe_experiments.py - runs execute
-strictly sequentially, in-process; each run is capped by both
-`training.max_steps` and a wall-clock SIGALRM timeout; a failing/hanging run
-is recorded and skipped rather than aborting the matrix; a result note is
-written immediately after each run finishes.
+Safety: identical guardrails to the other task runners - strictly
+sequential, in-process; each run capped by `training.max_steps` and a
+wall-clock SIGALRM timeout; a failing/hanging run is recorded and skipped;
+a result note is written immediately after each run finishes.
 """
 
 import copy
@@ -40,11 +46,14 @@ from datasets import load_dataset  # noqa: E402
 from src.pipelines.train import Trainer  # noqa: E402
 from src.utils import read_yaml, setup_logger, write_yaml  # noqa: E402
 
-logger = setup_logger("pe_classification_experiments")
+logger = setup_logger("pe_nli_experiments")
 
-ROOT_DOCS = ROOT / "docs" / date.today().isoformat()
-BASE_CONFIG_PATH = ROOT / "configs" / "experiment_classification.yaml"
-EXPERIMENT_CONFIG_DIR = ROOT / "configs" / "experiments_classification"
+DOCS_DIR = ROOT / "docs" / date.today().isoformat()
+BASE_CONFIG_PATH = ROOT / "configs" / "experiment_nli.yaml"
+EXPERIMENT_CONFIG_DIR = ROOT / "configs" / "experiments_nli"
+
+TRAIN_PARQUET = ROOT / "data" / "nli_train.parquet"
+VAL_PARQUET = ROOT / "data" / "nli_validation.parquet"
 
 PE_TYPES = [
     "absolute",
@@ -60,8 +69,6 @@ PE_TYPES = [
     "none",
 ]
 
-TRAIN_SUBSET = 3000
-SPLIT_SEED = 18210
 RUN_TIMEOUT_SECONDS = 900  # hard wall-clock ceiling per PE type, on top of max_steps
 
 
@@ -74,28 +81,30 @@ def _alarm_handler(signum, frame):
 
 
 def load_local_splits():
-    """Loads the full local SST-2 parquet files and takes a subset of train.
-    Validation (872 rows) is used whole - GLUE's real test split has no
-    public labels, so validation stands in for both periodic and final eval.
+    """Downloads GLUE RTE once to local parquet (if not already present),
+    then loads from there - same "download once, reuse locally" pattern as
+    the SST-2 and CoNLL-2003 runners.
     """
+    if not (TRAIN_PARQUET.exists() and VAL_PARQUET.exists()):
+        logger.info("Local NLI parquet files not found - downloading GLUE RTE once.")
+        ds = load_dataset("nyu-mll/glue", "rte")
+        TRAIN_PARQUET.parent.mkdir(parents=True, exist_ok=True)
+        ds["train"].to_parquet(str(TRAIN_PARQUET))
+        ds["validation"].to_parquet(str(VAL_PARQUET))
+
     ds = load_dataset(
         "parquet",
-        data_files={
-            "train": str(ROOT / "data" / "sst2_train.parquet"),
-            "validation": str(ROOT / "data" / "sst2_validation.parquet"),
-        },
+        data_files={"train": str(TRAIN_PARQUET), "validation": str(VAL_PARQUET)},
     )
-    train_ds = ds["train"].shuffle(seed=SPLIT_SEED).select(range(TRAIN_SUBSET))
-    val_ds = ds["validation"]
-    return train_ds, val_ds
+    return ds["train"], ds["validation"]
 
 
 def write_results_note(
     pe_type: str, metrics: dict | None, duration_s: float, error: str | None
 ) -> None:
-    ROOT_DOCS.mkdir(parents=True, exist_ok=True)
-    path = ROOT_DOCS / f"classification-results-{pe_type}.md"
-    lines = [f"# SST-2 classification result: `{pe_type}`", ""]
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    path = DOCS_DIR / f"nli-results-{pe_type}.md"
+    lines = [f"# NLI (GLUE RTE) result: `{pe_type}`", ""]
     lines.append(f"- Duration: {duration_s:.1f}s")
     if error:
         lines.append(f"- **Status: FAILED** - {error}")
@@ -114,7 +123,7 @@ def run_one(pe_type: str, train_ds, val_ds) -> tuple[dict | None, float, str | N
     config = copy.deepcopy(base_config)
     config["model"]["position_embedding_type"] = pe_type
     config["training"]["checkpoint_dir"] = str(
-        ROOT / "checkpoints" / "experiments_classification" / pe_type
+        ROOT / "checkpoints" / "experiments_nli" / pe_type
     )
 
     EXPERIMENT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -128,7 +137,7 @@ def run_one(pe_type: str, train_ds, val_ds) -> tuple[dict | None, float, str | N
     try:
         trainer = Trainer(config_path=str(config_path))
         # Validation stands in for both periodic eval and the final "test"
-        # metrics `train()` reports - see module docstring.
+        # metrics `train()` reports - GLUE's real test split has no labels.
         trainer.setup_dataloaders(
             train_dataset=train_ds, val_dataset=val_ds, test_dataset=val_ds
         )
@@ -146,14 +155,15 @@ def run_one(pe_type: str, train_ds, val_ds) -> tuple[dict | None, float, str | N
 
 
 def write_summary(rows: list[tuple[str, dict | None, float, str | None]]) -> None:
-    path = ROOT_DOCS / "classification-results-summary.md"
+    path = DOCS_DIR / "nli-results-summary.md"
     lines = [
-        "# PE comparative experiment summary: SST-2 sentiment classification",
+        "# PE comparative experiment summary: GLUE RTE (NLI)",
         "",
-        f"Same {len(PE_TYPES)} PE schemes as the MLM comparison, now fine-tuned from scratch "
-        f"(no MLM pretraining reused) on a {TRAIN_SUBSET}-row subset of GLUE "
-        "SST-2, evaluated on the full 872-row validation split (GLUE's real "
-        "test split has no public labels). Random-guess baseline is 50%.",
+        f"Same {len(PE_TYPES)} PE schemes as the other task comparisons, "
+        "fine-tuned from scratch (no MLM pretraining reused) on the full "
+        "2490-row RTE train split, evaluated on the full 277-row validation "
+        "split (GLUE's real test split has no public labels). Random-guess "
+        "baseline is 50% (2 classes, roughly balanced).",
         "",
         "| PE type | loss | accuracy | duration (s) | status |",
         "|---|---|---|---|---|",
@@ -172,7 +182,7 @@ def write_summary(rows: list[tuple[str, dict | None, float, str | None]]) -> Non
 
 
 def main() -> None:
-    ROOT_DOCS.mkdir(parents=True, exist_ok=True)
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
     train_ds, val_ds = load_local_splits()
     logger.info(f"Loaded subsets: train={len(train_ds)}, validation={len(val_ds)}")
 
